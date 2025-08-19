@@ -107,3 +107,61 @@ async def upload_youtube(link: YouTubeLink):
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+# --- conversion WAV & fichiers statiques ---
+from pathlib import Path
+import uuid, subprocess, os
+import imageio_ffmpeg
+
+FILES_ROOT = Path(os.getenv("FILES_ROOT", "/opt/render/project/src/files"))
+FILES_ROOT.mkdir(parents=True, exist_ok=True)
+
+def ffmpeg_path():
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+def convert_to_wav(src_path: Path, stereo: bool = True, sr: int = 44100) -> Path:
+    dst = src_path.with_suffix(".wav")
+    ch = "2" if stereo else "1"
+    cmd = [
+        ffmpeg_path(),
+        "-y", "-i", str(src_path),
+        "-vn",
+        "-ac", ch,
+        "-ar", str(sr),
+        "-sample_fmt", "s16",
+        str(dst),
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"FFmpeg error: {proc.stderr.decode(errors='ignore')}")
+    return dst
+
+@app.post("/api/convert-wav")
+async def convert_wav(file: UploadFile = File(...)):
+    # 1) sauvegarde dans un dossier de job unique
+    job_id = str(uuid.uuid4())
+    job_dir = FILES_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    src_path = job_dir / file.filename
+    data = await file.read()
+    src_path.write_bytes(data)
+
+    # 2) conversion
+    wav_path = convert_to_wav(src_path, stereo=True, sr=44100)
+
+    # 3) urls de téléchargement
+    return {
+        "jobId": job_id,
+        "original": f"/files/{job_id}/{src_path.name}",
+        "wav": f"/files/{job_id}/{wav_path.name}",
+        "note": "Clique ces URLs dans ton navigateur pour télécharger.",
+    }
+
+# Servir les fichiers générés (téléchargement)
+from fastapi.responses import FileResponse
+@app.get("/files/{job_id}/{filename}")
+def serve_file(job_id: str, filename: str):
+    path = FILES_ROOT / job_id / filename
+    if not path.exists():
+        raise HTTPException(404, "Fichier introuvable")
+    return FileResponse(str(path), filename=filename, media_type="application/octet-stream")
