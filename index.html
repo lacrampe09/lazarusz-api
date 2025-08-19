@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LAZARUS‑Z – Frontend (Render)</title>
+  <style>
+    :root{--bg:#0f1115;--card:#181b22;--ok:#1f7a1f;--err:#a61b2b;--text:#e6e6e6;--muted:#a8b3cf;--accent:#7aa2ff}
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,Segoe UI,Roboto,Ubuntu,sans-serif}
+    .wrap{max-width:760px;margin:36px auto;padding:20px}
+    .card{background:var(--card);border:1px solid #22283a;border-radius:14px;padding:20px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+    .logo{text-align:center;margin-bottom:18px}
+    .logo img{max-width:200px;height:auto}
+    h1{font-size:22px;margin:0 0 4px}
+    h2{font-size:18px;margin:18px 0 8px}
+    p{color:var(--muted);margin:0 0 12px}
+    label{display:block;margin:10px 0 6px}
+    input[type="url"], input[type="file"], button{width:100%}
+    input[type="url"], input[type="file"]{padding:12px;border:1px solid #2d3550;border-radius:10px;background:#121620;color:var(--text)}
+    button{margin-top:10px;padding:12px;border:0;border-radius:10px;background:#2b3553;color:#fff;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .msg{margin-top:10px;padding:10px;border-radius:10px;display:none;white-space:pre-wrap}
+    .msg.ok{background:rgba(31,122,31,.15);border:1px solid var(--ok);display:block}
+    .msg.err{background:rgba(166,27,43,.15);border:1px solid var(--err);display:block}
+    .preview{margin-top:12px;border-radius:12px;overflow:hidden;display:none}
+    iframe{width:100%;aspect-ratio:16/9;border:0}
+    pre{background:#111624;padding:12px;border-radius:10px;color:var(--accent);margin-top:10px;overflow:auto}
+    .warn{background:#3a2a00;border:1px solid #8a5f00;color:#ffd57a;padding:10px;border-radius:10px;margin-bottom:12px;display:none}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="localWarn" class="warn">Vous ouvrez cette page depuis votre disque (<code>file://</code>). Certains navigateurs bloquent les requêtes. <strong>Conseillé :</strong> lancez un petit serveur local et ouvrez <code>http://127.0.0.1:8001/frontend.html</code>. Voir note en bas.</div>
+
+    <div class="logo"><img src="logo.png" alt="LAZARUS‑Z" /></div>
+    <div class="card">
+      <h1>Envoyer un lien YouTube</h1>
+      <p>Collez l'URL d'une vidéo. Un aperçu s'affiche si c'est valide.</p>
+      <label for="ytUrl">Lien YouTube</label>
+      <input id="ytUrl" type="url" placeholder="https://www.youtube.com/watch?v=XXXXXXXXXXX" autocomplete="off" />
+      <div id="ytMsg" class="msg" role="status" aria-live="polite"></div>
+      <div class="preview" id="ytPreview"><iframe id="ytPlayer" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe></div>
+      <button id="ytSend" disabled>Envoyer le lien à l'API</button>
+      <pre id="ytResult"></pre>
+
+      <hr style="margin:20px 0;border:0;border-top:1px solid #2d3550" />
+
+      <h2>Uploader un fichier MP3 / WAV</h2>
+      <input id="fileInput" type="file" accept="audio/mpeg,audio/wav,.mp3,.wav" />
+      <button id="fileSend">Envoyer le fichier à l'API</button>
+      <pre id="fileResult"></pre>
+
+      <p style="margin-top:14px;color:#8ea3d1">API : <code>https://lazarusz-api.onrender.com</code></p>
+    </div>
+
+    <p style="margin-top:14px;color:#8ea3d1">Astuce Windows : dans le dossier du fichier, tapez <code>powershell</code> dans la barre d'adresse puis <code>python -m http.server 8001</code> et ouvrez <a href="http://127.0.0.1:8001/frontend.html">http://127.0.0.1:8001/frontend.html</a>.</p>
+  </div>
+
+  <script>
+    // ===== Détection ouverture file:// =====
+    if (location.protocol === 'file:') {
+      document.getElementById('localWarn').style.display = 'block';
+    }
+
+    // ===== Utilitaires UI =====
+    function show(el, text, isOk){ el.textContent = text; el.className = 'msg ' + (isOk ? 'ok' : 'err'); el.style.display = 'block'; }
+    function hide(el){ el.textContent=''; el.className='msg'; el.style.display='none'; }
+
+    // ===== YouTube =====
+    const YT_ID_REGEX = /(?:v=|youtu\.be\/|shorts\/|embed\/)([A-Za-z0-9_-]{11})(?=[&#?\s]|$)/;
+    const ytUrl = document.getElementById('ytUrl');
+    const ytMsg = document.getElementById('ytMsg');
+    const ytPreview = document.getElementById('ytPreview');
+    const ytPlayer = document.getElementById('ytPlayer');
+    const ytSend = document.getElementById('ytSend');
+    const ytResult = document.getElementById('ytResult');
+    let ytId = null;
+
+    ytUrl.addEventListener('input', () => {
+      const url = (ytUrl.value || '').trim();
+      ytId = null; hide(ytMsg); ytPreview.style.display='none'; ytPlayer.removeAttribute('src'); ytSend.disabled = true; ytResult.textContent='';
+      if (!url) return;
+      const m = url.match(YT_ID_REGEX);
+      if (!m) { show(ytMsg, 'Lien non reconnu. Exemple: https://www.youtube.com/watch?v=dQw4w9WgXcQ', false); return; }
+      ytId = m[1];
+      show(ytMsg, 'Lien valide.', true);
+      ytPlayer.src = `https://www.youtube.com/embed/${ytId}`; ytPreview.style.display='block';
+      ytSend.disabled = false;
+    });
+
+    ytSend.addEventListener('click', async () => {
+      if (!ytId) return;
+      ytResult.textContent = '';
+      try {
+        const res = await fetch('https://lazarusz-api.onrender.com/api/upload-youtube', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ youtubeUrl: ytUrl.value.trim() })
+        });
+        const txt = await res.text(); // pour voir même les erreurs
+        try { ytResult.textContent = JSON.stringify(JSON.parse(txt), null, 2); }
+        catch { ytResult.textContent = txt; }
+      } catch (e) {
+        ytResult.textContent = '❌ ' + (e?.message || e);
+      }
+    });
+
+    // ===== Upload fichier =====
+    const fileInput = document.getElementById('fileInput');
+    const fileSend = document.getElementById('fileSend');
+    const fileResult = document.getElementById('fileResult');
+
+    fileSend.addEventListener('click', async () => {
+      fileResult.textContent = '';
+      const f = fileInput.files?.[0];
+      if (!f) { fileResult.textContent = 'Choisissez un MP3 ou WAV.'; return; }
+      const form = new FormData(); form.append('file', f);
+      try {
+        const res = await fetch('https://lazarusz-api.onrender.com/api/upload', { method:'POST', body: form });
+        const txt = await res.text();
+        try { fileResult.textContent = JSON.stringify(JSON.parse(txt), null, 2); }
+        catch { fileResult.textContent = txt; }
+      } catch (e) { fileResult.textContent = '❌ ' + (e?.message || e); }
+    });
+  </script>
+</body>
+</html>
