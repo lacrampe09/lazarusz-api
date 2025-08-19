@@ -165,3 +165,131 @@ def serve_file(job_id: str, filename: str):
     if not path.exists():
         raise HTTPException(404, "Fichier introuvable")
     return FileResponse(str(path), filename=filename, media_type="application/octet-stream")
+# ====== Séparation des pistes : orchestration côté API ======
+from pathlib import Path
+import uuid, os, json
+from typing import List
+from fastapi import UploadFile, Form, Header
+
+API_TOKEN = os.getenv("API_TOKEN", None)  # ← À définir dans Render (Settings > Environment)
+
+def _job_dir(job_id: str) -> Path:
+    d = FILES_ROOT / job_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def _state_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "state.json"
+
+def _load_state(job_id: str) -> dict:
+    p = _state_path(job_id)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except:
+            pass
+    return {"status": "created", "stems": {}, "notes": []}
+
+def _save_state(job_id: str, state: dict):
+    _state_path(job_id).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _find_wav(job_id: str) -> Path | None:
+    # on cherche un .wav dans le dossier du job
+    for p in _job_dir(job_id).glob("*.wav"):
+        return p
+    return None
+
+@app.post("/api/mark-separation")
+def mark_separation(jobId: str = Form(...)):
+    """
+    Marque un job comme 'pending' pour séparation.
+    Précondition : le dossier /files/{jobId} contient un WAV (via /api/convert-wav).
+    """
+    wav = _find_wav(jobId)
+    if not wav:
+        raise HTTPException(400, "Aucun WAV trouvé pour ce job. Utilise d'abord /api/convert-wav.")
+    st = _load_state(jobId)
+    st["status"] = "pending"
+    st["wav"] = wav.name
+    _save_state(jobId, st)
+    return {
+        "message": "Job marqué en attente de séparation",
+        "jobId": jobId,
+        "wav": f"/files/{jobId}/{wav.name}"
+    }
+
+@app.get("/api/jobs")
+def list_jobs(status: str = "pending"):
+    """
+    Liste les jobs par statut (pending|done|all) – pour le worker.
+    """
+    jobs: List[dict] = []
+    for job_dir in FILES_ROOT.iterdir():
+        if not job_dir.is_dir():
+            continue
+        job_id = job_dir.name
+        st = _load_state(job_id)
+        if status == "all" or st.get("status") == status:
+            wav = st.get("wav") or (_find_wav(job_id).name if _find_wav(job_id) else None)
+            jobs.append({
+                "jobId": job_id,
+                "status": st.get("status"),
+                "wav": f"/files/{job_id}/{wav}" if wav else None,
+                "stems": st.get("stems", {}),
+            })
+    return {"jobs": jobs}
+
+@app.get("/api/job/{job_id}")
+def job_status(job_id: str):
+    st = _load_state(job_id)
+    stems = {}
+    for name, fname in st.get("stems", {}).items():
+        stems[name] = f"/files/{job_id}/{fname}"
+    return {
+        "jobId": job_id,
+        "status": st.get("status"),
+        "wav": f"/files/{job_id}/{st.get('wav')}" if st.get("wav") else None,
+        "stems": stems,
+        "notes": st.get("notes", [])
+    }
+
+@app.post("/api/upload-stem")
+async def upload_stem(
+    jobId: str = Form(...),
+    stemName: str = Form(...),  # ex: vocals | bass | drums | piano | other
+    file: UploadFile = File(...),
+    x_api_token: str = Header(None, convert_underscores=False),
+):
+    """
+    Reçoit une piste séparée depuis le worker (protégé par X-API-TOKEN).
+    """
+    if API_TOKEN and x_api_token != API_TOKEN:
+        raise HTTPException(401, "Invalid API token")
+
+    job_dir = _job_dir(jobId)
+    # nom de fichier stable : {stem}.wav
+    stem_filename = f"{stemName}.wav"
+    stem_path = job_dir / stem_filename
+    stem_path.write_bytes(await file.read())
+
+    # maj état
+    st = _load_state(jobId)
+    stems = st.get("stems", {})
+    stems[stemName] = stem_filename
+    st["stems"] = stems
+
+    # Si on a 5 stems, on passe en 'done'
+    EXPECTED = {"vocals", "bass", "drums", "piano", "other"}
+    if EXPECTED.issubset(stems.keys()):
+        st["status"] = "done"
+    else:
+        st["status"] = "processing"
+    _save_state(jobId, st)
+
+    return {
+        "message": "Stem reçu",
+        "jobId": jobId,
+        "stem": stemName,
+        "url": f"/files/{jobId}/{stem_filename}",
+        "status": st["status"],
+    }
