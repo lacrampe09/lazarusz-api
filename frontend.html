@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LAZARUS‑Z – Upload & Lien YouTube</title>
+  <style>
+    :root{--bg:#0f1115;--card:#181b22;--ok:#1f7a1f;--err:#a61b2b;--text:#e6e6e6;--muted:#a8b3cf;--accent:#7aa2ff}
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,Segoe UI,Roboto,Ubuntu,sans-serif}
+    .wrap{max-width:720px;margin:40px auto;padding:24px}
+    .card{background:var(--card);border:1px solid #22283a;border-radius:14px;padding:20px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+    h1{font-size:22px;margin:0 0 12px}
+    h2{font-size:18px;margin:16px 0 8px}
+    p{color:var(--muted)}
+    label{display:block;margin:10px 0 6px}
+    input[type="url"], input[type="file"]{display:block;width:100%;padding:12px;border:1px solid #2d3550;border-radius:10px;background:#121620;color:var(--text)}
+    .msg{margin-top:12px;padding:12px;border-radius:10px;display:none}
+    .msg.ok{background:rgba(31,122,31,.15);border:1px solid var(--ok);display:block}
+    .msg.err{background:rgba(166,27,43,.15);border:1px solid var(--err);display:block}
+    button{margin-top:16px;padding:10px 16px;border:0;border-radius:10px;background:#2b3553;color:#fff;cursor:not-allowed;opacity:.6}
+    button.ready{background:var(--accent);cursor:pointer;opacity:1}
+    .preview{margin-top:12px;border-radius:12px;overflow:hidden;display:none}
+    iframe{width:100%;aspect-ratio:16/9;border:0}
+    pre{background:#111624;padding:12px;border-radius:10px;color:var(--accent);margin-top:12px;overflow-x:auto}
+    .logo{text-align:center;margin-bottom:20px}
+    .logo img{max-width:180px;height:auto}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo">
+      <img src="logo.png" alt="LAZARUS-Z" />
+    </div>
+
+    <div class="card">
+      <h1>Coller un lien YouTube</h1>
+      <label for="ytUrl">Lien YouTube</label>
+      <input id="ytUrl" type="url" placeholder="https://www.youtube.com/watch?v=XXXXXXXXXXX" />
+      <div id="message" class="msg"></div>
+      <div class="preview" id="preview">
+        <iframe id="player" allowfullscreen></iframe>
+      </div>
+      <button id="goBtn" type="button" disabled>Envoyer le lien</button>
+
+      <hr style="margin:24px 0;border:0;border-top:1px solid #2d3550">
+
+      <h2>Uploader un fichier MP3 / WAV</h2>
+      <input id="fileInput" type="file" accept="audio/mp3,audio/wav" />
+      <button id="uploadBtn" type="button">Uploader</button>
+      <pre id="result"></pre>
+    </div>
+  </div>
+
+  <script>
+    const YT_ID_REGEX = /(?:v=|\/)([A-Za-z0-9_-]{11})(?:[&#?]|$)/;
+    const input = document.getElementById('ytUrl');
+    const msg = document.getElementById('message');
+    const goBtn = document.getElementById('goBtn');
+    const preview = document.getElementById('preview');
+    const player = document.getElementById('player');
+    let currentId = null;
+
+    input.addEventListener('input', () => {
+      const url = (input.value || '').trim();
+      resetUI();
+      if (!url) return;
+      const m = url.match(YT_ID_REGEX);
+      if (!m) {
+        return showError('Lien non reconnu');
+      }
+      const id = m[1];
+      currentId = id;
+      showOk('Lien valide.');
+      enableButton();
+      showPreview(id);
+    });
+
+    goBtn.addEventListener('click', async () => {
+      if (!currentId) return;
+      try {
+        const res = await fetch("https://lazarusz-api.onrender.com/api/upload-youtube", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ youtubeUrl: input.value.trim() })
+        });
+        if (!res.ok) throw new Error("Erreur API");
+        const data = await res.json();
+        alert("✅ Réponse API : " + JSON.stringify(data));
+      } catch (err) {
+        showError("❌ " + err.message);
+      }
+    });
+
+    function showPreview(id){
+      player.src = `https://www.youtube.com/embed/${id}`;
+      preview.style.display = 'block';
+    }
+    function resetUI(){
+      msg.className = 'msg';
+      msg.textContent = '';
+      msg.style.display = 'none';
+      goBtn.disabled = true;
+      goBtn.classList.remove('ready');
+      preview.style.display = 'none';
+      player.removeAttribute('src');
+    }
+    function showError(text){
+      msg.textContent = text;
+      msg.className = 'msg err';
+      msg.style.display = 'block';
+    }
+    function showOk(text){
+      msg.textContent = text;
+      msg.className = 'msg ok';
+      msg.style.display = 'block';
+    }
+    function enableButton(){
+      goBtn.disabled = false;
+      goBtn.classList.add('ready');
+    }
+
+    // Upload MP3/WAV
+    const uploadBtn = document.getElementById("uploadBtn");
+    const fileInput = document.getElementById("fileInput");
+    const result = document.getElementById("result");
+
+    uploadBtn.addEventListener("click", async () => {
+      const file = fileInput.files[0];
+      if (!file) {
+        alert("Choisis un fichier MP3 ou WAV !");
+        return;
+      }
+      const formData = new FormData();
+      formData.append("file", file);
+      try {
+        const res = await fetch("https://lazarusz-api.onrender.com/api/upload", {
+          method: "POST",
+          body: formData
+        });
+        if (!res.ok) throw new Error("Erreur API");
+        const data = await res.json();
+        result.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        result.textContent = "❌ " + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
