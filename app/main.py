@@ -1,13 +1,13 @@
+# app/main.py
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Any, Dict, Optional
+from typing import Optional, Dict, Any
+import os, re, requests
 
-import yt_dlp  # pour extraire les métadonnées YouTube (sans télécharger)
+app = FastAPI(title="LAZARUS-Z API", version="0.4")
 
-app = FastAPI(title="LAZARUS-Z API", version="0.3")
-
-# CORS – simple et permissif pour tester (en prod: remplace "*" par ton domaine)
+# CORS permissif pour tes tests (en prod, remplace "*" par ton domaine)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,6 +16,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+
 class YouTubeLink(BaseModel):
     youtubeUrl: str
 
@@ -23,7 +25,7 @@ class YouTubeLink(BaseModel):
 def root():
     return {"message": "Hello, Lazarus-Z API is running!"}
 
-# ====== Upload FICHIER (MP3/WAV) ======
+# ========= Upload d'un fichier (MP3/WAV) =========
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(None)):
     if file:
@@ -31,57 +33,77 @@ async def upload_file(file: UploadFile = File(None)):
         return {"filename": file.filename, "size_bytes": len(data)}
     return {"error": "No file uploaded"}
 
-# ====== Métadonnées YouTube (sans téléchargement) ======
-def _pick_best_audio_format(info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    best = None
-    for f in (info.get("formats") or []):
-        # audio-only (pas de vidéo) et codec audio présent
-        if f.get("acodec") != "none" and not f.get("video_ext"):
-            if (best is None) or (f.get("abr", 0) > best.get("abr", 0)):
-                best = f
-    return best
+# ========= Utils YouTube =========
+_YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})")
 
-def _normalize_info(info: Dict[str, Any], original_url: str) -> Dict[str, Any]:
-    # Si c'est une playlist, prendre la première entrée
-    if "entries" in info and isinstance(info["entries"], list) and info["entries"]:
-        info = info["entries"][0]
+def extract_video_id(url: str) -> Optional[str]:
+    """
+    Prend en charge:
+      - https://www.youtube.com/watch?v=XXXXXXXXXXX
+      - https://youtu.be/XXXXXXXXXXX
+      - https://www.youtube.com/shorts/XXXXXXXXXXX
+      - https://www.youtube.com/embed/XXXXXXXXXXX
+    Si une playlist est donnée, on prend l'ID vidéo s'il est présent (param v).
+    """
+    m = _YT_ID_RE.search(url)
+    return m.group(1) if m else None
 
-    best_audio = _pick_best_audio_format(info)
+def iso8601_to_seconds(iso: str) -> int:
+    """
+    Convertit une durée ISO8601 YouTube (ex: PT1H2M3S) en secondes.
+    """
+    # ex: PT2H10M30S, PT4M20S, PT50S…
+    hrs = mins = secs = 0
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso or "")
+    if m:
+        hrs = int(m.group(1) or 0)
+        mins = int(m.group(2) or 0)
+        secs = int(m.group(3) or 0)
+    return hrs * 3600 + mins * 60 + secs
+
+def fetch_youtube_metadata(video_id: str) -> Dict[str, Any]:
+    if not YOUTUBE_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="YOUTUBE_API_KEY manquant. Ajoutez la variable d'environnement sur Render."
+        )
+    url = (
+        "https://www.googleapis.com/youtube/v3/videos"
+        f"?part=snippet,contentDetails&id={video_id}&key={YOUTUBE_API_KEY}"
+    )
+    r = requests.get(url, timeout=15)
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Appel API YouTube échoué: {r.text}")
+    data = r.json()
+    items = data.get("items", [])
+    if not items:
+        raise HTTPException(status_code=404, detail="Vidéo introuvable ou privée.")
+    item = items[0]
+    snippet = item.get("snippet", {})
+    content = item.get("contentDetails", {})
+    duration_iso = content.get("duration")
     return {
-        "id": info.get("id"),
-        "title": info.get("title"),
-        "uploader": info.get("uploader"),
-        "channel": info.get("channel"),
-        "duration_sec": info.get("duration"),
-        "thumbnail": info.get("thumbnail"),
-        "webpage_url": info.get("webpage_url") or original_url,
-        "best_audio_url": best_audio.get("url") if best_audio else None,
-        "best_audio_ext": best_audio.get("ext") if best_audio else None,
-        "best_audio_abr": best_audio.get("abr") if best_audio else None,
+        "id": item.get("id"),
+        "title": snippet.get("title"),
+        "channel": snippet.get("channelTitle"),
+        "publishedAt": snippet.get("publishedAt"),
+        "thumbnail": (snippet.get("thumbnails", {}).get("high", {}) or
+                      snippet.get("thumbnails", {}).get("default", {})).get("url"),
+        "duration_iso8601": duration_iso,
+        "duration_seconds": iso8601_to_seconds(duration_iso or "PT0S"),
+        "webpage_url": f"https://www.youtube.com/watch?v={item.get('id')}"
     }
 
-def extract_youtube_info(url: str) -> Dict[str, Any]:
-    ydl_opts = {
-        "quiet": True,
-        "skip_download": True,
-        "nocheckcertificate": True,
-        "extract_flat": False,
-        "retries": 2,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return _normalize_info(info, url)
-
+# ========= Lien YouTube -> métadonnées via API officielle =========
 @app.post("/api/upload-youtube")
 async def upload_youtube(link: YouTubeLink):
-    try:
-        meta = extract_youtube_info(link.youtubeUrl)
-        return {"message": "Métadonnées récupérées", "meta": meta}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Extraction impossible: {e}")
+    vid = extract_video_id(link.youtubeUrl)
+    if not vid:
+        raise HTTPException(status_code=400, detail="Lien YouTube non reconnu (impossible d'extraire l'ID).")
+    meta = fetch_youtube_metadata(vid)
+    return {"message": "Métadonnées récupérées", "meta": meta}
 
-
-# (Optionnel) endpoint santé simple
+# Santé
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
