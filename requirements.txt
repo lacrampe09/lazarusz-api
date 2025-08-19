@@ -2,3 +2,7 @@ fastapi
 uvicorn
 python-multipart
 requests
+imageio-ffmpeg
+soundfile
+librosa
+numpy
